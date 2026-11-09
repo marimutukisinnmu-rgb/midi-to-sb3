@@ -2,6 +2,8 @@ import os
 import struct
 from dataclasses import dataclass, field
 
+from blackmidi_detector import check_polyphony, LIMIT
+
 
 class MIDIParseError(Exception):
     """MIDI解析エラー"""
@@ -170,9 +172,17 @@ def parse_track(path, offset, length):
 
 
 def parse_midi(path):
-    """Parse a Standard MIDI File into MIDIFile/MIDITrack/MIDIEvent objects."""
+    """
+    Parse a Standard MIDI File.
+
+    Returns None without parsing when the polyphony detector reaches LIMIT.
+    """
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
+
+    maximum, passed = check_polyphony(path)
+    if not passed:
+        return None
 
     tracks_info = []
 
