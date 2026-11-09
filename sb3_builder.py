@@ -433,3 +433,39 @@ def build_from_file(midi_path, output_path, project_name="MIDI Project"):
             "Polyphony limit reached; MIDI parser did not run."
         )
     return build_sb3(midi, output_path, project_name=project_name)
+
+
+
+def main():
+    import sys
+
+    if len(sys.argv) < 2:
+        filename = os.path.basename(__file__)
+        print(f"Usage: python {filename} input.mid [output.sb3]")
+        return 1
+
+    input_path = sys.argv[1]
+    output_path = (
+        sys.argv[2]
+        if len(sys.argv) >= 3
+        else os.path.splitext(input_path)[0] + ".sb3"
+    )
+
+    try:
+        result = build_from_file(input_path, output_path)
+
+        print("[SUCCESS] SB3 generated")
+        print(f"Output: {result['output']}")
+        print(f"Tracks: {result['tracks']}")
+        print(f"Notes: {result['notes']}")
+        print(f"Voices: {result['voices']}")
+
+        return 0
+
+    except Exception as e:
+        print(f"[ERROR] {type(e).__name__}: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
