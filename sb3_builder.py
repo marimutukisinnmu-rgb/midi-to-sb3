@@ -16,6 +16,7 @@ import bisect
 import hashlib
 import json
 import os
+import heapq
 import zipfile
 from collections import defaultdict, deque
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ class SB3BuildError(Exception):
 SCRATCH_MAX_CLONES = 300
 MUSIC_CONCURRENCY_LIMIT = 30
 MUSIC_FIXED_TEMPO = 60.0
+DEFAULT_SOUND_LIMIT = 30
 MAX_MUSIC_BEATS = 100.0
 
 
@@ -183,6 +185,55 @@ def _max_polyphony(notes):
         active += change
         maximum = max(maximum, active)
     return maximum
+
+
+def _note_priority(note, ticks_per_beat):
+    """Higher values are more likely to remain in the mix."""
+    duration_beats = max(0.0, (note.end - note.start) / ticks_per_beat)
+    # Velocity is the main signal; duration breaks ties in favor of sustained parts.
+    return (int(note.velocity) * 1000) + min(duration_beats, 8.0)
+
+
+def _trim_polyphony(notes, sound_limit, ticks_per_beat):
+    """Drop the least prominent active notes whenever the requested cap is exceeded.
+
+    A note is removed as a whole rather than abruptly shortened. At each overload
+    point, the quietest active note is discarded; longer notes win velocity ties.
+    """
+    if not notes:
+        return [], 0
+
+    # End events precede start events at the same tick.
+    events = []
+    for index, note in enumerate(notes):
+        events.append((note.start, 1, index))
+        events.append((note.end, 0, index))
+    events.sort()
+
+    active = {}
+    heap = []
+    kept = [True] * len(notes)
+
+    for _, event_type, index in events:
+        if event_type == 0:
+            active.pop(index, None)
+            continue
+
+        note = notes[index]
+        priority = _note_priority(note, ticks_per_beat)
+        active[index] = priority
+        heapq.heappush(heap, (priority, index))
+
+        if len(active) > sound_limit:
+            while heap:
+                lowest_priority, lowest_index = heapq.heappop(heap)
+                if active.get(lowest_index) == lowest_priority:
+                    del active[lowest_index]
+                    kept[lowest_index] = False
+                    break
+
+    trimmed = [note for index, note in enumerate(notes) if kept[index]]
+    return trimmed, len(notes) - len(trimmed)
 
 
 def _new_id(counter):
@@ -531,7 +582,8 @@ def _build_stage(note_rows):
     return stage, stage_lists, {f"{asset_id}.svg": svg}
 
 
-def build_sb3(midi, output_path, project_name="MIDI Project"):
+def build_sb3(midi, output_path, project_name="MIDI Project",
+              sound_limit=DEFAULT_SOUND_LIMIT):
     """Build an SB3 project using Stage lists and one clone per note."""
     if midi is None:
         raise SB3BuildError("MIDI parsing was skipped (polyphony limit reached)")
@@ -541,18 +593,23 @@ def build_sb3(midi, output_path, project_name="MIDI Project"):
         )
     if midi.ticks_per_beat <= 0:
         raise SB3BuildError("Invalid ticks_per_beat")
+    if not 1 <= int(sound_limit) <= SCRATCH_MAX_CLONES:
+        raise SB3BuildError(
+            f"--sound must be between 1 and {SCRATCH_MAX_CLONES}."
+        )
+    sound_limit = int(sound_limit)
 
     notes = []
     for track in midi.tracks:
         notes.extend(_track_notes(track))
     notes.sort(key=lambda note: (note.start, note.end, note.channel, note.pitch))
 
+    original_maximum = _max_polyphony(notes)
+    original_note_count = len(notes)
+    notes, removed_notes = _trim_polyphony(
+        notes, sound_limit, midi.ticks_per_beat
+    )
     maximum = _max_polyphony(notes)
-    if maximum >= SCRATCH_MAX_CLONES:
-        raise SB3BuildError(
-            f"Maximum polyphony is {maximum}; Scratch allows at most "
-            f"{SCRATCH_MAX_CLONES} clones at once."
-        )
 
     tick_to_seconds = _build_tempo_converter(midi)
     rows = []
@@ -599,43 +656,61 @@ def build_sb3(midi, output_path, project_name="MIDI Project"):
         "output": output_path,
         "tracks": len(midi.tracks),
         "notes": len(notes),
+        "original_notes": original_note_count,
+        "removed_notes": removed_notes,
+        "original_max_polyphony": original_maximum,
         "voices": maximum,
         "max_polyphony": maximum,
+        "sound_limit": sound_limit,
         "music_concurrency_limit": MUSIC_CONCURRENCY_LIMIT,
         "warnings": (
-            [f"Polyphony {maximum} exceeds Scratch Music's "
-             f"{MUSIC_CONCURRENCY_LIMIT}-sound concurrency threshold; "
-             "some notes may be skipped."]
-            if maximum > MUSIC_CONCURRENCY_LIMIT else []
+            [f"Could not reduce polyphony to --sound {sound_limit}; "
+             f"remaining maximum is {maximum}."]
+            if maximum > sound_limit else []
         ),
         "list_items": len(rows),
     }
 
 
-def build_from_file(midi_path, output_path, project_name="MIDI Project"):
+def build_from_file(midi_path, output_path, project_name="MIDI Project",
+                    sound_limit=DEFAULT_SOUND_LIMIT):
     """Parse a MIDI file (including the clone-capacity pre-check) and build SB3."""
     from midi_parser import parse_midi
 
-    midi = parse_midi(midi_path)
+    # Let the builder apply the user-selected sound cap instead of rejecting
+    # the file at the detector's generic 300-voice threshold.
+    midi = parse_midi(midi_path, skip_polyphony_check=True)
     if midi is None:
         raise SB3BuildError(
             "Polyphony limit reached; MIDI parser did not run."
         )
-    return build_sb3(midi, output_path, project_name=project_name)
+    return build_sb3(
+        midi, output_path, project_name=project_name,
+        sound_limit=sound_limit
+    )
 
 
 def main():
-    import sys
+    import argparse
 
-    if len(sys.argv) < 2:
-        filename = os.path.basename(__file__)
-        print(f"Usage: python {filename} input.mid [output.sb3]")
-        return 1
+    parser = argparse.ArgumentParser(
+        description="Convert a MIDI file to a Scratch 3.0 SB3 project."
+    )
+    parser.add_argument("input", help="Input MIDI file")
+    parser.add_argument("output", nargs="?", help="Output SB3 file")
+    parser.add_argument(
+        "--sound", type=int, default=DEFAULT_SOUND_LIMIT,
+        metavar="1-300",
+        help="Maximum simultaneous notes (default: 30)"
+    )
+    args = parser.parse_args()
 
-    input_path = sys.argv[1]
-    if len(sys.argv) >= 3:
-        output_path = sys.argv[2]
-    else:
+    if not 1 <= args.sound <= SCRATCH_MAX_CLONES:
+        parser.error(f"--sound must be between 1 and {SCRATCH_MAX_CLONES}")
+
+    input_path = args.input
+    output_path = args.output
+    if output_path is None:
         try:
             import tkinter as tk
             from tkinter import filedialog
@@ -663,12 +738,19 @@ def main():
             return 0
 
     try:
-        result = build_from_file(input_path, output_path)
+        result = build_from_file(
+            input_path, output_path, sound_limit=args.sound
+        )
         print("[SUCCESS] SB3 generated")
         print(f"Output: {result['output']}")
         print(f"Tracks: {result['tracks']}")
-        print(f"Notes: {result['notes']}")
-        print(f"Max Polyphony / Clones: {result['max_polyphony']}")
+        print(f"Notes: {result['notes']} / {result['original_notes']}")
+        print(f"Removed notes: {result['removed_notes']}")
+        print(
+            "Max Polyphony: "
+            f"{result['original_max_polyphony']} -> "
+            f"{result['max_polyphony']} (limit: {result['sound_limit']})"
+        )
         print(f"Stage list items: {result['list_items']}")
         for warning in result["warnings"]:
             print(f"[WARNING] {warning}")
