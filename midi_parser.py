@@ -172,18 +172,19 @@ def parse_track(path, offset, length):
     return track
 
 
-def parse_midi(path):
+def parse_midi(path, skip_polyphony_check=False):
     """
     Parse a Standard MIDI File.
 
-    Returns None without parsing when the polyphony detector reaches LIMIT.
+    Returns None without parsing when the optional polyphony pre-check reaches LIMIT.
     """
     if not os.path.isfile(path):
         raise FileNotFoundError(path)
 
-    maximum, passed = check_polyphony(path)
-    if not passed:
-        return None
+    if not skip_polyphony_check:
+        maximum, passed = check_polyphony(path)
+        if not passed:
+            return None
 
     tracks_info = []
 
