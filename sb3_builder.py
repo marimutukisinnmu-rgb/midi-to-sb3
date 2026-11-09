@@ -328,7 +328,7 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
         "notePitch", "noteInstrument",
     ]
     variables = {
-        f"var_{name}": [name, 0, False]
+        f"var_{name}": [name, 0, True]
         for name in variable_names
     }
     var_ids = {name: f"var_{name}" for name in variable_names}
