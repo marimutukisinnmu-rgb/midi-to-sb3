@@ -320,6 +320,7 @@ def check_polyphony(path):
 
 def main():
     if len(sys.argv) < 2:
+        filename = os.path.basename(__file__)
         print(f"Usage: python {filename} file.mid")
         return
 
