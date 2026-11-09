@@ -320,7 +320,7 @@ def check_polyphony(path):
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python index.py file.mid")
+        print(f"Usage: python {filename} file.mid")
         return
 
     path = sys.argv[1]
