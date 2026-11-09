@@ -445,11 +445,40 @@ def main():
         return 1
 
     input_path = sys.argv[1]
-    output_path = (
-        sys.argv[2]
-        if len(sys.argv) >= 3
-        else os.path.splitext(input_path)[0] + ".sb3"
-    )
+    if len(sys.argv) >= 3:
+        # An explicitly supplied output path skips the save dialog.
+        output_path = sys.argv[2]
+    else:
+        # Use the native Windows save dialog when the user chooses the
+        # output location interactively.
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+        except ImportError as e:
+            print(f"[ERROR] Tkinter is unavailable: {e}")
+            return 1
+
+        input_abs = os.path.abspath(input_path)
+        initial_dir = os.path.dirname(input_abs)
+        initial_name = os.path.splitext(os.path.basename(input_abs))[0] + ".sb3"
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            output_path = filedialog.asksaveasfilename(
+                parent=root,
+                title="Save Scratch project",
+                initialdir=initial_dir,
+                initialfile=initial_name,
+                defaultextension=".sb3",
+                filetypes=[("Scratch 3 project", "*.sb3"), ("All files", "*.*")]
+            )
+        finally:
+            root.destroy()
+
+        if not output_path:
+            print("[CANCEL] Save cancelled.")
+            return 0
 
     try:
         result = build_from_file(input_path, output_path)
