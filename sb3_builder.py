@@ -550,7 +550,7 @@ def _build_stage(note_rows):
     stage_lists = {}
     for name, values in list_values.items():
         list_id = f"list_{name}"
-        lists[list_id] = [name, values, False]
+        lists[list_id] = [name, values]
         stage_lists[name] = (list_id, values)
 
     stage = {
