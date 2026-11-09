@@ -1,3 +1,4 @@
+import sys
 import os
 import struct
 from dataclasses import dataclass, field
@@ -232,3 +233,43 @@ def parse_midi(path):
         ticks_per_beat=division,
         tracks=tracks
     )
+
+
+
+def main():
+    if len(sys.argv) < 2:
+        filename = os.path.basename(__file__)
+        print(f"Usage: python {filename} file.mid")
+        return 1
+
+    path = sys.argv[1]
+
+    try:
+        midi = parse_midi(path)
+
+        if midi is None:
+            print(f"[FAIL] Polyphony reached {LIMIT}+")
+            print("MIDI parsing was skipped.")
+            return 1
+
+        print("[PASS] MIDI parsing completed")
+        print(f"Format: {midi.format}")
+        print(f"Ticks per beat: {midi.ticks_per_beat}")
+        print(f"Tracks: {len(midi.tracks)}")
+
+        for index, track in enumerate(midi.tracks):
+            print(
+                f"Track {index}: "
+                f"{track.name or '(unnamed)'} "
+                f"({len(track.events)} events)"
+            )
+
+        return 0
+
+    except Exception as e:
+        print(f"[ERROR] {type(e).__name__}: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
