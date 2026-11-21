@@ -511,9 +511,8 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
     spawn_if = _add_block(
         blocks, counter, "control_if", parent=repeat_groups
     )
-    blocks[spawn_if]["inputs"]["CONDITION"] = _reporter_input(
-        has_notes, 3, "false"
-    )
+    # Scratch boolean inputs use type 2 with a reporter block ID only.
+    blocks[spawn_if]["inputs"]["CONDITION"] = [2, has_notes]
     blocks[spawn_if]["inputs"]["SUBSTACK"] = [2, call_batch]
     blocks[call_batch]["parent"] = spawn_if
 
