@@ -5,8 +5,10 @@ Architecture:
 - One hidden worker sprite schedules note groups by MIDI start tick.
 - A warp custom block creates all note clones in the current tick group.
 - Each note clone plays one note and deletes itself.
-- MIDI tempo changes are converted to absolute seconds. Scratch Music is
-  held at 60 BPM so note durations and start delays use seconds directly.
+- MIDI tempo changes are replayed by changing Scratch Music tempo at each
+  timeline event. Note durations are stored in beats.
+- Effective tempo is clamped to the supported 20-500 BPM range before both
+  timeline conversion and Scratch playback.
 
 The Scratch Music extension has a separate audio concurrency limit. The
 builder reports when MIDI polyphony exceeds the extension's documented
@@ -30,7 +32,9 @@ class SB3BuildError(Exception):
 
 SCRATCH_MAX_CLONES = 300
 MUSIC_CONCURRENCY_LIMIT = 30
-MUSIC_FIXED_TEMPO = 60.0
+MIN_MUSIC_TEMPO = 20.0
+MAX_MUSIC_TEMPO = 500.0
+DEFAULT_MIDI_TEMPO = 500000
 DEFAULT_SOUND_LIMIT = 30
 MAX_MUSIC_BEATS = 100.0
 
@@ -110,8 +114,8 @@ def _track_notes(track):
     return notes
 
 
-def _build_tempo_converter(midi):
-    """Return tick->seconds using the file-wide MIDI tempo map."""
+def _build_tempo_map(midi):
+    """Return a clamped tick->seconds converter and normalized tempo points."""
     events = []
     for track_index, track in enumerate(midi.tracks):
         for event_index, event in enumerate(track.events):
@@ -128,22 +132,34 @@ def _build_tempo_converter(midi):
 
     events.sort(key=lambda item: (item[0], item[1], item[2]))
 
-    # MIDI's default tempo is 500,000 microseconds per quarter note.
-    tempo_points = [(0, 500000)]
+    # MIDI's default tempo is 500,000 microseconds per quarter note (120 BPM).
+    raw_points = [(0, DEFAULT_MIDI_TEMPO)]
     for tick, _, _, tempo in events:
-        if tick == tempo_points[-1][0]:
-            tempo_points[-1] = (tick, tempo)
+        if tick == raw_points[-1][0]:
+            raw_points[-1] = (tick, tempo)
         else:
-            tempo_points.append((tick, tempo))
+            raw_points.append((tick, tempo))
+
+    # Clamp BPM, then convert the clamped BPM back to microseconds per beat.
+    tempo_points = []
+    for tick, tempo_us in raw_points:
+        bpm = 60_000_000.0 / tempo_us
+        bpm = max(MIN_MUSIC_TEMPO, min(MAX_MUSIC_TEMPO, bpm))
+        normalized_us = round(60_000_000.0 / bpm)
+        if tempo_points and tempo_points[-1][0] == tick:
+            tempo_points[-1] = (tick, normalized_us, bpm)
+        else:
+            tempo_points.append((tick, normalized_us, bpm))
 
     ticks = []
     seconds_at_tick = []
     tempos = []
+    bpms = []
     elapsed = 0.0
     previous_tick = 0
     previous_tempo = tempo_points[0][1]
 
-    for index, (tick, tempo) in enumerate(tempo_points):
+    for index, (tick, tempo_us, bpm) in enumerate(tempo_points):
         if index:
             elapsed += (
                 (tick - previous_tick)
@@ -153,9 +169,10 @@ def _build_tempo_converter(midi):
             )
         ticks.append(tick)
         seconds_at_tick.append(elapsed)
-        tempos.append(tempo)
+        tempos.append(tempo_us)
+        bpms.append(bpm)
         previous_tick = tick
-        previous_tempo = tempo
+        previous_tempo = tempo_us
 
     def tick_to_seconds(tick):
         tick = max(0, int(tick))
@@ -168,7 +185,10 @@ def _build_tempo_converter(midi):
             / midi.ticks_per_beat
         )
 
-    return tick_to_seconds
+    return tick_to_seconds, [
+        (tick, seconds_at_tick[index], bpms[index])
+        for index, (tick, _, _) in enumerate(tempo_points)
+    ]
 
 
 def _max_polyphony(notes):
@@ -392,7 +412,7 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
     )
     set_tempo = _add_block(
         blocks, counter, "music_setTempo", parent=flag,
-        inputs={"TEMPO": _number_input(MUSIC_FIXED_TEMPO)}
+        inputs={"TEMPO": _number_input(120)}
     )
     blocks[flag]["next"] = set_tempo
     hide = _add_block(blocks, counter, "looks_hide", parent=set_tempo)
@@ -424,15 +444,15 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
     )
     blocks[init_previous]["next"] = repeat_groups
     group_length = _add_list_length_reporter(
-        blocks, counter, stage_lists["GroupStartSeconds"][0],
-        "GroupStartSeconds", repeat_groups
+        blocks, counter, stage_lists["TimelineSeconds"][0],
+        "TimelineSeconds", repeat_groups
     )
     blocks[repeat_groups]["inputs"]["TIMES"] = _reporter_input(
         group_length, 6, "0"
     )
 
     group_start = add_set_from_list(
-        repeat_groups, "groupStart", "GroupStartSeconds", "groupIndex"
+        repeat_groups, "groupStart", "TimelineSeconds", "groupIndex"
     )
     wait_block = _add_block(
         blocks, counter, "control_wait", parent=repeat_groups
@@ -447,7 +467,21 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
         wait_difference, 4, "0"
     )
     group_end = add_set_from_list(
-        repeat_groups, "groupEndIndex", "GroupEndIndices", "groupIndex"
+        repeat_groups, "groupEndIndex", "TimelineEndIndices", "groupIndex"
+    )
+
+    # Apply the effective (20-500 BPM clamped) tempo before starting notes
+    # at this same MIDI tick.
+    apply_tempo = _add_block(
+        blocks, counter, "music_setTempo", parent=repeat_groups
+    )
+    tempo_reporter = _add_list_item_reporter(
+        blocks, counter, stage_lists["TimelineTempoBPM"][0],
+        "TimelineTempoBPM", var_ids["groupIndex"], "groupIndex",
+        apply_tempo
+    )
+    blocks[apply_tempo]["inputs"]["TEMPO"] = _reporter_input(
+        tempo_reporter, 4, "120"
     )
 
     call_batch = _add_block(
@@ -478,7 +512,7 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
     )
 
     group_body = [
-        group_start, wait_block, group_end, call_batch,
+        group_start, wait_block, group_end, apply_tempo, call_batch,
         update_previous, increment_group,
     ]
     for left, right in zip(group_body, group_body[1:]):
@@ -608,7 +642,7 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
 
     return sprite, {f"{asset_id}.svg": svg}
 
-def _build_stage(note_rows):
+def _build_stage(note_rows, tempo_points):
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1" '
         'viewBox="0 0 1 1"><rect width="1" height="1" '
@@ -616,25 +650,45 @@ def _build_stage(note_rows):
     ).encode("utf-8")
     asset_id = hashlib.md5(svg).hexdigest()
 
-    # Consecutive notes with the same original MIDI tick belong to one batch.
-    group_start_seconds = []
-    group_end_indices = []
-    previous_tick = None
+    # Build one ordered timeline containing both tempo changes and note batches.
+    note_rows = sorted(note_rows, key=lambda row: (row[0], row[4]))
+    notes_by_tick = defaultdict(list)
     for note_index, row in enumerate(note_rows, start=1):
-        if previous_tick is None or row[4] != previous_tick:
-            group_start_seconds.append(row[0])
-            group_end_indices.append(note_index)
-            previous_tick = row[4]
+        notes_by_tick[row[4]].append((note_index, row))
+
+    tempo_by_tick = {tick: bpm for tick, _, bpm in tempo_points}
+    timeline_ticks = sorted(set(notes_by_tick) | set(tempo_by_tick))
+
+    timeline_seconds = []
+    timeline_tempo_bpm = []
+    timeline_end_indices = []
+    current_bpm = 120.0
+
+    for tick in timeline_ticks:
+        if tick in tempo_by_tick:
+            current_bpm = tempo_by_tick[tick]
+        timeline_seconds.append(
+            next((seconds for t, seconds, _ in tempo_points if t == tick),
+                 None)
+        )
+        timeline_tempo_bpm.append(round(current_bpm, 6))
+        if tick in notes_by_tick:
+            timeline_end_indices.append(notes_by_tick[tick][-1][0])
         else:
-            group_end_indices[-1] = note_index
+            timeline_end_indices.append(0)
+
+    # Ensure every timeline point has an absolute timestamp. Tempo points and
+    # note starts share the same tick->seconds converter supplied by the caller.
+    if any(value is None for value in timeline_seconds):
+        raise SB3BuildError("Timeline is missing a tempo-converted timestamp.")
 
     list_values = {
-        "StartSeconds": [row[0] for row in note_rows],
-        "DurationSeconds": [row[1] for row in note_rows],
+        "DurationBeats": [row[1] for row in note_rows],
         "Pitch": [row[2] for row in note_rows],
         "Instrument": [row[3] for row in note_rows],
-        "GroupStartSeconds": group_start_seconds,
-        "GroupEndIndices": group_end_indices,
+        "TimelineSeconds": timeline_seconds,
+        "TimelineTempoBPM": timeline_tempo_bpm,
+        "TimelineEndIndices": timeline_end_indices,
     }
     lists = {}
     stage_lists = {}
@@ -664,7 +718,7 @@ def _build_stage(note_rows):
         "sounds": [],
         "volume": 100,
         "layerOrder": 0,
-        "tempo": MUSIC_FIXED_TEMPO,
+        "tempo": 120,
         "videoTransparency": 50,
         "videoState": "on",
         "textToSpeechLanguage": None,
@@ -701,22 +755,34 @@ def build_sb3(midi, output_path, project_name="MIDI Project",
     )
     maximum = _max_polyphony(notes)
 
-    tick_to_seconds = _build_tempo_converter(midi)
+    tick_to_seconds, tempo_points = _build_tempo_map(midi)
     rows = []
     for note in notes:
-        start_seconds = tick_to_seconds(note.start)
-        end_seconds = tick_to_seconds(note.end)
-        duration_seconds = max(0.001, end_seconds - start_seconds)
+        duration_beats = max(
+            0.001, (note.end - note.start) / midi.ticks_per_beat
+        )
         rows.append((
-            round(start_seconds, 6),
-            round(duration_seconds, 6),
+            tick_to_seconds(note.start),
+            duration_beats,
             int(note.pitch),
             int(note.instrument),
             int(note.start),
         ))
-    rows.sort(key=lambda row: row[0])
+    rows.sort(key=lambda row: (row[0], row[4]))
 
-    stage, stage_lists, stage_assets = _build_stage(rows)
+    # Add note-only ticks to the tempo map so the manager can schedule them.
+    timeline_tempo_points = list(tempo_points)
+    tempo_ticks = {tick for tick, _, _ in timeline_tempo_points}
+    for tick in sorted({row[4] for row in rows} - tempo_ticks):
+        timeline_tempo_points.append((
+            tick, tick_to_seconds(tick),
+            next(bpm for t, _, bpm in reversed(tempo_points) if t <= tick)
+        ))
+    timeline_tempo_points.sort(key=lambda item: item[0])
+
+    stage, stage_lists, stage_assets = _build_stage(
+        rows, timeline_tempo_points
+    )
     counter = [0]
     worker, worker_assets = _build_worker_sprite(stage_lists, counter)
 
@@ -760,7 +826,7 @@ def build_sb3(midi, output_path, project_name="MIDI Project",
             if maximum > sound_limit else []
         ),
         "list_items": len(rows),
-        "tick_groups": len(stage_lists["GroupStartSeconds"][1]),
+        "tick_groups": sum(1 for end_index in stage_lists["TimelineEndIndices"][1] if end_index),
     }
 
 
