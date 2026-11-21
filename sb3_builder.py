@@ -623,10 +623,12 @@ def _build_stage(note_rows):
     # Consecutive notes with the same start time belong to one MIDI tick batch.
     group_start_seconds = []
     group_end_indices = []
+    previous_tick = None
     for note_index, row in enumerate(note_rows, start=1):
-        if not group_start_seconds or row[0] != group_start_seconds[-1]:
+        if previous_tick is None or row[4] != previous_tick:
             group_start_seconds.append(row[0])
             group_end_indices.append(note_index)
+            previous_tick = row[4]
         else:
             group_end_indices[-1] = note_index
 
@@ -714,6 +716,7 @@ def build_sb3(midi, output_path, project_name="MIDI Project",
             round(duration_seconds, 6),
             int(note.pitch),
             int(note.instrument),
+            int(note.start),
         ))
     rows.sort(key=lambda row: row[0])
 
