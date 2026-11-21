@@ -485,7 +485,7 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
     )
 
     call_batch = _add_block(
-        blocks, counter, "procedures_call", parent=repeat_groups
+        blocks, counter, "procedures_call"
     )
     call_batch["mutation"] = {
         "tagName": "mutation",
@@ -496,6 +496,26 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
         "argumentdefaults": "[]",
         "warp": "true",
     }
+
+    # Tempo-only timeline points have end index 0 and must not spawn clones.
+    has_notes = _add_block(
+        blocks, counter, "operator_gt", parent=repeat_groups
+    )
+    end_index_reporter = _add_variable_reporter(
+        blocks, counter, var_ids["groupEndIndex"], "groupEndIndex", has_notes
+    )
+    blocks[has_notes]["inputs"] = {
+        "OPERAND1": _reporter_input(end_index_reporter, 4, "0"),
+        "OPERAND2": _number_input(0),
+    }
+    spawn_if = _add_block(
+        blocks, counter, "control_if", parent=repeat_groups
+    )
+    blocks[spawn_if]["inputs"]["CONDITION"] = _reporter_input(
+        has_notes, 3, "false"
+    )
+    blocks[spawn_if]["inputs"]["SUBSTACK"] = [2, call_batch]
+    blocks[call_batch]["parent"] = spawn_if
 
     update_previous = _add_block(
         blocks, counter, "data_setvariableto", parent=repeat_groups,
@@ -512,7 +532,7 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
     )
 
     group_body = [
-        group_start, wait_block, group_end, apply_tempo, call_batch,
+        group_start, wait_block, group_end, apply_tempo, spawn_if,
         update_previous, increment_group,
     ]
     for left, right in zip(group_body, group_body[1:]):
