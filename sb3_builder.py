@@ -49,6 +49,7 @@ class Note:
     channel: int
     instrument: int
     volume: int = 127
+    expression: int = 127
 
 
 def _event_value(event, name, default=None):
@@ -64,6 +65,7 @@ def _track_notes(track):
     # MIDI CC 7 defaults to 127 here so files without explicit volume events
     # retain the existing full-volume behavior.
     volumes = defaultdict(lambda: 127)
+    expressions = defaultdict(lambda: 127)
     notes = []
     events = sorted(
         enumerate(track.events),
@@ -86,18 +88,24 @@ def _track_notes(track):
                 0, min(127, int(_event_value(event, "value", 127)))
             )
 
+        elif event_type == "expression":
+            expressions[channel] = max(
+                0, min(127, int(_event_value(event, "value", 127)))
+            )
+
         elif event_type == "note_on":
             pitch = int(_event_value(event, "note", 0))
             velocity = int(_event_value(event, "velocity", 0))
             active[(channel, pitch)].append(
-                (tick, velocity, programs[channel], volumes[channel])
+                (tick, velocity, programs[channel], volumes[channel],
+                 expressions[channel])
             )
 
         elif event_type == "note_off":
             pitch = int(_event_value(event, "note", 0))
             queue = active[(channel, pitch)]
             if queue:
-                start, velocity, program, volume = queue.popleft()
+                start, velocity, program, volume, expression = queue.popleft()
                 if tick > start:
                     notes.append(Note(
                         start=start,
@@ -107,11 +115,12 @@ def _track_notes(track):
                         channel=channel,
                         instrument=program + 1,
                         volume=volume,
+                        expression=expression,
                     ))
 
     for (channel, pitch), queue in active.items():
         while queue:
-            start, velocity, program, volume = queue.popleft()
+            start, velocity, program, volume, expression = queue.popleft()
             if last_tick > start:
                 notes.append(Note(
                     start=start,
@@ -121,6 +130,7 @@ def _track_notes(track):
                     channel=channel,
                     instrument=program + 1,
                     volume=volume,
+                    expression=expression,
                 ))
 
     return notes
@@ -864,7 +874,7 @@ def build_sb3(midi, output_path, project_name="MIDI Project",
             int(note.pitch),
             int(note.instrument),
             int(note.start),
-            round(note.volume * 100 / 127, 2),
+            round(note.volume * note.expression * 100 / (127 * 127), 2),
         ))
     rows.sort(key=lambda row: (row[0], row[4]))
 
