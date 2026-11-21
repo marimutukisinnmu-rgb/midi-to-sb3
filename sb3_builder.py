@@ -209,6 +209,18 @@ def _max_polyphony(notes):
     return maximum
 
 
+def _max_notes_in_window(notes, tick_to_seconds, window_seconds=0.5):
+    """Return the maximum note-on count in any half-open time window."""
+    starts = sorted(tick_to_seconds(note.start) for note in notes)
+    left = 0
+    maximum = 0
+    for right, current_time in enumerate(starts):
+        while current_time - starts[left] >= window_seconds:
+            left += 1
+        maximum = max(maximum, right - left + 1)
+    return maximum
+
+
 def _note_priority(note, ticks_per_beat):
     """Higher values are more likely to remain in the mix."""
     duration_beats = max(0.0, (note.end - note.start) / ticks_per_beat)
@@ -791,12 +803,18 @@ def build_sb3(midi, output_path, project_name="MIDI Project",
     tick_to_seconds, tempo_points = _build_tempo_map(midi)
 
     original_maximum = _max_polyphony(notes)
+    original_nps_window_maximum = _max_notes_in_window(
+        notes, tick_to_seconds, NPS_WINDOW_SECONDS
+    )
     original_note_count = len(notes)
     notes, removed_notes = _trim_polyphony(
         notes, sound_limit, midi.ticks_per_beat, tick_to_seconds,
         nps_window_seconds=NPS_WINDOW_SECONDS
     )
     maximum = _max_polyphony(notes)
+    nps_window_maximum = _max_notes_in_window(
+        notes, tick_to_seconds, NPS_WINDOW_SECONDS
+    )
     rows = []
     for note in notes:
         start_seconds = tick_to_seconds(note.start)
@@ -866,6 +884,9 @@ def build_sb3(midi, output_path, project_name="MIDI Project",
         "original_notes": original_note_count,
         "removed_notes": removed_notes,
         "original_max_polyphony": original_maximum,
+        "original_nps_window_maximum": original_nps_window_maximum,
+        "nps_window_maximum": nps_window_maximum,
+        "nps_window_seconds": NPS_WINDOW_SECONDS,
         "voices": maximum,
         "max_polyphony": maximum,
         "sound_limit": sound_limit,
@@ -954,6 +975,11 @@ def main():
         print(f"Tracks: {result['tracks']}")
         print(f"Notes: {result['notes']} / {result['original_notes']}")
         print(f"Removed notes: {result['removed_notes']}")
+        print(
+            f"Max notes / {result['nps_window_seconds']:.1f}s: "
+            f"{result['original_nps_window_maximum']} -> "
+            f"{result['nps_window_maximum']} (limit: {result['sound_limit']})"
+        )
         print(
             "Max Polyphony: "
             f"{result['original_max_polyphony']} -> "
