@@ -592,7 +592,7 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
     blocks[repeat_notes]["inputs"]["TIMES"] = _reporter_input(add_one, 4, "1")
 
     set_duration = add_set_from_list(
-        repeat_notes, "noteDuration", "DurationSeconds", "index"
+        repeat_notes, "noteDuration", "DurationBeats", "index"
     )
     set_pitch = add_set_from_list(
         repeat_notes, "notePitch", "Pitch", "index"
