@@ -487,7 +487,7 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
     call_batch = _add_block(
         blocks, counter, "procedures_call"
     )
-    call_batch["mutation"] = {
+    blocks[call_batch]["mutation"] = {
         "tagName": "mutation",
         "children": [],
         "proccode": "spawn current tick notes",
