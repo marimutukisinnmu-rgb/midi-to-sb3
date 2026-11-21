@@ -10,9 +10,9 @@ Architecture:
 - Effective tempo is clamped to the supported 20-500 BPM range before both
   timeline conversion and Scratch playback.
 
-The Scratch Music extension has a separate audio concurrency limit. The
-builder reports when MIDI polyphony exceeds the extension's documented
-30-sound threshold; clones do not bypass that audio limit.
+The builder enforces both a rolling 0.5-second note-on limit and a separate
+simultaneous-note limit. The Scratch Music extension also has its own audio
+concurrency limit; clones do not bypass that limit.
 """
 
 import bisect
@@ -31,6 +31,7 @@ class SB3BuildError(Exception):
 
 
 SCRATCH_MAX_CLONES = 300
+NPS_WINDOW_SECONDS = 0.5
 MUSIC_CONCURRENCY_LIMIT = 30
 MIN_MUSIC_TEMPO = 20.0
 MAX_MUSIC_TEMPO = 500.0
@@ -215,47 +216,67 @@ def _note_priority(note, ticks_per_beat):
     return (int(note.velocity) * 1000) + min(duration_beats, 8.0)
 
 
-def _trim_polyphony(notes, sound_limit, ticks_per_beat):
-    """Drop the least prominent active notes whenever the requested cap is exceeded.
+def _trim_polyphony(notes, sound_limit, ticks_per_beat, tick_to_seconds,
+                    nps_window_seconds=0.5):
+    """Enforce both a sliding NPS window and simultaneous-note limit.
 
-    A note is removed as a whole rather than abruptly shortened. At each overload
-    point, the quietest active note is discarded; longer notes win velocity ties.
+    A note is removed as a whole. On overload, the quietest note is discarded;
+    longer notes win velocity ties. The NPS window is half-open: notes exactly
+    0.5 seconds apart do not count in the same window.
     """
     if not notes:
         return [], 0
 
-    # End events precede start events at the same tick.
-    events = []
-    for index, note in enumerate(notes):
-        events.append((note.start, 1, index))
-        events.append((note.end, 0, index))
-    events.sort()
-
-    active = {}
-    heap = []
     kept = [True] * len(notes)
+    active = {}
+    recent = deque()
 
-    for _, event_type, index in events:
-        if event_type == 0:
-            active.pop(index, None)
+    for index, note in enumerate(notes):
+        start_seconds = tick_to_seconds(note.start)
+
+        # Expire notes that are no longer sounding.
+        expired = [
+            active_index for active_index, active_note in active.items()
+            if active_note.end <= note.start
+        ]
+        for active_index in expired:
+            del active[active_index]
+
+        # Keep only note starts inside the trailing half-second window.
+        cutoff = start_seconds - nps_window_seconds
+        while recent and tick_to_seconds(notes[recent[0]].start) <= cutoff:
+            recent.popleft()
+        while recent and not kept[recent[0]]:
+            recent.popleft()
+
+        recent.append(index)
+
+        # Enforce the rolling NPS limit. A previous note may be removed if it
+        # has lower priority than the newly-arrived note.
+        recent_indices = [i for i in recent if kept[i]]
+        if len(recent_indices) > sound_limit:
+            lowest_index = min(
+                recent_indices,
+                key=lambda i: (_note_priority(notes[i], ticks_per_beat), i)
+            )
+            kept[lowest_index] = False
+            active.pop(lowest_index, None)
+
+        if not kept[index]:
             continue
 
-        note = notes[index]
-        priority = _note_priority(note, ticks_per_beat)
-        active[index] = priority
-        heapq.heappush(heap, (priority, index))
-
+        # Enforce simultaneous polyphony independently of the NPS limit.
+        active[index] = note
         if len(active) > sound_limit:
-            while heap:
-                lowest_priority, lowest_index = heapq.heappop(heap)
-                if active.get(lowest_index) == lowest_priority:
-                    del active[lowest_index]
-                    kept[lowest_index] = False
-                    break
+            lowest_index = min(
+                active,
+                key=lambda i: (_note_priority(notes[i], ticks_per_beat), i)
+            )
+            del active[lowest_index]
+            kept[lowest_index] = False
 
     trimmed = [note for index, note in enumerate(notes) if kept[index]]
     return trimmed, len(notes) - len(trimmed)
-
 
 def _new_id(counter):
     counter[0] += 1
@@ -767,14 +788,15 @@ def build_sb3(midi, output_path, project_name="MIDI Project",
         notes.extend(_track_notes(track))
     notes.sort(key=lambda note: (note.start, note.end, note.channel, note.pitch))
 
+    tick_to_seconds, tempo_points = _build_tempo_map(midi)
+
     original_maximum = _max_polyphony(notes)
     original_note_count = len(notes)
     notes, removed_notes = _trim_polyphony(
-        notes, sound_limit, midi.ticks_per_beat
+        notes, sound_limit, midi.ticks_per_beat, tick_to_seconds,
+        nps_window_seconds=NPS_WINDOW_SECONDS
     )
     maximum = _max_polyphony(notes)
-
-    tick_to_seconds, tempo_points = _build_tempo_map(midi)
     rows = []
     for note in notes:
         start_seconds = tick_to_seconds(note.start)
