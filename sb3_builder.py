@@ -2,7 +2,8 @@
 
 Architecture:
 - MIDI note events are stored in Stage lists inside project.json.
-- One hidden worker sprite creates one clone per note event.
+- One hidden worker sprite schedules note groups by MIDI start tick.
+- A warp custom block creates all note clones in the current tick group.
 - Each note clone plays one note and deletes itself.
 - MIDI tempo changes are converted to absolute seconds. Scratch Music is
   held at 60 BPM so note durations and start delays use seconds directly.
@@ -321,11 +322,11 @@ def _link(blocks, previous_id, next_id):
 
 
 def _build_worker_sprite(stage_lists, counter, layer_order=1):
-    """Build a hidden manager sprite and a one-note-per-clone worker."""
+    """Build a hidden manager and a warp custom block that spawns one tick batch."""
     sprite_id = "worker-sprite"
     variable_names = [
-        "index", "previousStart", "noteStart", "noteDuration",
-        "notePitch", "noteInstrument",
+        "index", "groupIndex", "previousStart", "groupStart",
+        "groupEndIndex", "noteDuration", "notePitch", "noteInstrument",
     ]
     variables = {
         f"var_{name}": [name, 0, True]
@@ -372,147 +373,222 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
     }
     blocks = sprite["blocks"]
 
-    # Manager: initialize the fixed tempo and spawn one clone for each note.
+    def add_set_from_list(parent_id, variable_name, list_name, index_name):
+        block_id = _add_block(
+            blocks, counter, "data_setvariableto", parent=parent_id,
+            fields={"VARIABLE": [variable_name, var_ids[variable_name]]}
+        )
+        reporter = _add_list_item_reporter(
+            blocks, counter, stage_lists[list_name][0], list_name,
+            var_ids[index_name], index_name, block_id
+        )
+        blocks[block_id]["inputs"]["VALUE"] = _reporter_input(reporter)
+        return block_id
+
+    # The manager waits once per tick group, then invokes the warp batch block.
     flag = _add_block(
         blocks, counter, "event_whenflagclicked",
         top_level=True, x=40, y=40
     )
-    set_tempo = _add_block(
-        blocks, counter, "music_setTempo", parent=flag,
-        inputs={"TEMPO": _number_input(MUSIC_FIXED_TEMPO)}
-    )
-    blocks[flag]["next"] = set_tempo
+    hide = _add_block(blocks, counter, "looks_hide", parent=flag)
+    blocks[flag]["next"] = hide
 
-    hide = _add_block(blocks, counter, "looks_hide", parent=set_tempo)
-    blocks[set_tempo]["next"] = hide
-
-    set_index = _add_block(
+    init_group = _add_block(
         blocks, counter, "data_setvariableto", parent=hide,
+        fields={"VARIABLE": ["groupIndex", var_ids["groupIndex"]]},
+        inputs={"VALUE": _number_input(1)}
+    )
+    blocks[hide]["next"] = init_group
+
+    init_note = _add_block(
+        blocks, counter, "data_setvariableto", parent=init_group,
         fields={"VARIABLE": ["index", var_ids["index"]]},
         inputs={"VALUE": _number_input(1)}
     )
-    blocks[hide]["next"] = set_index
+    blocks[init_group]["next"] = init_note
 
-    set_previous = _add_block(
-        blocks, counter, "data_setvariableto", parent=set_index,
+    init_previous = _add_block(
+        blocks, counter, "data_setvariableto", parent=init_note,
         fields={"VARIABLE": ["previousStart", var_ids["previousStart"]]},
         inputs={"VALUE": _number_input(0)}
     )
-    blocks[set_index]["next"] = set_previous
+    blocks[init_note]["next"] = init_previous
 
-    repeat = _add_block(
-        blocks, counter, "control_repeat", parent=set_previous
+    repeat_groups = _add_block(
+        blocks, counter, "control_repeat", parent=init_previous
     )
-    blocks[set_previous]["next"] = repeat
-    length_reporter = _add_list_length_reporter(
-        blocks, counter, stage_lists["StartSeconds"][0],
-        "StartSeconds", repeat
+    blocks[init_previous]["next"] = repeat_groups
+    group_length = _add_list_length_reporter(
+        blocks, counter, stage_lists["GroupStartSeconds"][0],
+        "GroupStartSeconds", repeat_groups
     )
-    blocks[repeat]["inputs"]["TIMES"] = _reporter_input(
-        length_reporter, 6, "0"
+    blocks[repeat_groups]["inputs"]["TIMES"] = _reporter_input(
+        group_length, 6, "0"
     )
 
-    # Body: set event data, wait until its start, then create its clone.
-    body = []
-    command_specs = [
-        ("data_setvariableto", "noteStart"),
-        ("control_wait", None),
-        ("data_setvariableto", "noteDuration"),
-        ("data_setvariableto", "notePitch"),
-        ("data_setvariableto", "noteInstrument"),
-        ("control_create_clone_of", None),
-        ("data_setvariableto", "previousStart"),
-        ("data_changevariableby", "index"),
-    ]
-    body_ids = []
-    for opcode, _ in command_specs:
-        body_ids.append(_add_block(
-            blocks, counter, opcode, parent=repeat
-        ))
-    for left, right in zip(body_ids, body_ids[1:]):
-        _link(blocks, left, right)
-    blocks[repeat]["inputs"]["SUBSTACK"] = [2, body_ids[0]]
-
-    # noteStart = item(index) of StartSeconds
-    reporter = _add_list_item_reporter(
-        blocks, counter, stage_lists["StartSeconds"][0], "StartSeconds",
-        var_ids["index"], "index", body_ids[0]
+    group_start = add_set_from_list(
+        repeat_groups, "groupStart", "GroupStartSeconds", "groupIndex"
     )
-    blocks[body_ids[0]]["fields"] = {
-        "VARIABLE": ["noteStart", var_ids["noteStart"]]
-    }
-    blocks[body_ids[0]]["inputs"]["VALUE"] = _reporter_input(reporter)
-
-    # wait (noteStart - previousStart) seconds
-    difference = _add_subtract_reporter(
+    wait_block = _add_block(
+        blocks, counter, "control_wait", parent=repeat_groups
+    )
+    wait_difference = _add_subtract_reporter(
         blocks, counter,
-        var_ids["noteStart"], "noteStart",
+        var_ids["groupStart"], "groupStart",
         var_ids["previousStart"], "previousStart",
-        body_ids[1]
+        wait_block
     )
-    blocks[body_ids[1]]["inputs"]["DURATION"] = _reporter_input(
-        difference, 4, "0"
+    blocks[wait_block]["inputs"]["DURATION"] = _reporter_input(
+        wait_difference, 4, "0"
+    )
+    group_end = add_set_from_list(
+        repeat_groups, "groupEndIndex", "GroupEndIndices", "groupIndex"
     )
 
-    # Remaining event fields from Stage lists.
-    for block_id, variable_name, list_name in [
-        (body_ids[2], "noteDuration", "DurationSeconds"),
-        (body_ids[3], "notePitch", "Pitch"),
-        (body_ids[4], "noteInstrument", "Instrument"),
-    ]:
-        reporter = _add_list_item_reporter(
-            blocks, counter, stage_lists[list_name][0], list_name,
-            var_ids["index"], "index", block_id
-        )
-        blocks[block_id]["fields"] = {
-            "VARIABLE": [variable_name, var_ids[variable_name]]
-        }
-        blocks[block_id]["inputs"]["VALUE"] = _reporter_input(reporter)
+    call_batch = _add_block(
+        blocks, counter, "procedures_call", parent=repeat_groups
+    )
+    call_batch["mutation"] = {
+        "tagName": "mutation",
+        "children": [],
+        "proccode": "spawn current tick notes",
+        "argumentids": "[]",
+        "argumentnames": "[]",
+        "argumentdefaults": "[]",
+        "warp": "true",
+    }
 
-    # Create clone of this sprite. The menu is a shadow block.
+    update_previous = _add_block(
+        blocks, counter, "data_setvariableto", parent=repeat_groups,
+        fields={"VARIABLE": ["previousStart", var_ids["previousStart"]]}
+    )
+    previous_reporter = _add_variable_reporter(
+        blocks, counter, var_ids["groupStart"], "groupStart", update_previous
+    )
+    blocks[update_previous]["inputs"]["VALUE"] = _reporter_input(previous_reporter)
+    increment_group = _add_block(
+        blocks, counter, "data_changevariableby", parent=repeat_groups,
+        fields={"VARIABLE": ["groupIndex", var_ids["groupIndex"]]},
+        inputs={"VALUE": _number_input(1)}
+    )
+
+    group_body = [
+        group_start, wait_block, group_end, call_batch,
+        update_previous, increment_group,
+    ]
+    for left, right in zip(group_body, group_body[1:]):
+        _link(blocks, left, right)
+    blocks[repeat_groups]["inputs"]["SUBSTACK"] = [2, group_body[0]]
+
+    # Define a warp custom block. It creates every note clone belonging to
+    # the current tick group before yielding back to the normal scheduler.
+    definition = _add_block(
+        blocks, counter, "procedures_definition",
+        top_level=True, x=420, y=40
+    )
+    prototype = _add_block(
+        blocks, counter, "procedures_prototype",
+        parent=definition, shadow=True
+    )
+    procedure_mutation = {
+        "tagName": "mutation",
+        "children": [],
+        "proccode": "spawn current tick notes",
+        "argumentids": "[]",
+        "argumentnames": "[]",
+        "argumentdefaults": "[]",
+        "warp": "true",
+    }
+    blocks[definition]["inputs"]["custom_block"] = [1, prototype]
+    blocks[prototype]["mutation"] = procedure_mutation
+
+    repeat_notes = _add_block(
+        blocks, counter, "control_repeat", parent=definition
+    )
+    blocks[definition]["next"] = repeat_notes
+
+    # Repeat (groupEndIndex - index + 1) times.
+    subtract_count = _add_block(
+        blocks, counter, "operator_subtract", parent=repeat_notes
+    )
+    group_end_reporter = _add_variable_reporter(
+        blocks, counter, var_ids["groupEndIndex"], "groupEndIndex",
+        subtract_count
+    )
+    index_reporter = _add_variable_reporter(
+        blocks, counter, var_ids["index"], "index", subtract_count
+    )
+    blocks[subtract_count]["inputs"] = {
+        "NUM1": _reporter_input(group_end_reporter, 4, "1"),
+        "NUM2": _reporter_input(index_reporter, 4, "1"),
+    }
+    add_one = _add_block(
+        blocks, counter, "operator_add", parent=repeat_notes
+    )
+    subtract_reporter = subtract_count
+    one_reporter = _add_block(
+        blocks, counter, "math_number", parent=add_one,
+        fields={"NUM": ["1", None]}, shadow=True
+    )
+    blocks[add_one]["inputs"] = {
+        "NUM1": _reporter_input(subtract_reporter, 3, "0"),
+        "NUM2": _reporter_input(one_reporter, 4, "1"),
+    }
+    blocks[repeat_notes]["inputs"]["TIMES"] = _reporter_input(add_one, 4, "1")
+
+    set_duration = add_set_from_list(
+        repeat_notes, "noteDuration", "DurationSeconds", "index"
+    )
+    set_pitch = add_set_from_list(
+        repeat_notes, "notePitch", "Pitch", "index"
+    )
+    set_instrument = add_set_from_list(
+        repeat_notes, "noteInstrument", "Instrument", "index"
+    )
+    create_clone = _add_block(
+        blocks, counter, "control_create_clone_of", parent=repeat_notes
+    )
     menu_id = _add_block(
         blocks, counter, "control_create_clone_of_menu",
-        parent=body_ids[5],
+        parent=create_clone,
         fields={"CLONE_OPTION": ["_myself_", None]},
         shadow=True
     )
-    blocks[body_ids[5]]["inputs"]["CLONE_OPTION"] = [1, menu_id]
-
-    # previousStart = noteStart
-    reporter = _add_variable_reporter(
-        blocks, counter, var_ids["noteStart"], "noteStart", body_ids[6]
+    blocks[create_clone]["inputs"]["CLONE_OPTION"] = [1, menu_id]
+    increment_note = _add_block(
+        blocks, counter, "data_changevariableby", parent=repeat_notes,
+        fields={"VARIABLE": ["index", var_ids["index"]]},
+        inputs={"VALUE": _number_input(1)}
     )
-    blocks[body_ids[6]]["fields"] = {
-        "VARIABLE": ["previousStart", var_ids["previousStart"]]
-    }
-    blocks[body_ids[6]]["inputs"]["VALUE"] = _reporter_input(reporter)
 
-    blocks[body_ids[7]]["fields"] = {
-        "VARIABLE": ["index", var_ids["index"]]
-    }
-    blocks[body_ids[7]]["inputs"]["VALUE"] = _number_input(1)
+    procedure_body = [
+        set_duration, set_pitch, set_instrument, create_clone, increment_note,
+    ]
+    for left, right in zip(procedure_body, procedure_body[1:]):
+        _link(blocks, left, right)
+    blocks[repeat_notes]["inputs"]["SUBSTACK"] = [2, procedure_body[0]]
 
-    # Clone worker: select this note's GM instrument, play it, then self-delete.
+    # Each clone inherits the manager's note variables and plays one note.
     clone_hat = _add_block(
         blocks, counter, "control_start_as_clone",
-        top_level=True, x=420, y=40
+        top_level=True, x=800, y=40
     )
-    set_instrument = _add_block(
+    set_instrument_clone = _add_block(
         blocks, counter, "music_midiSetInstrument", parent=clone_hat
     )
-    blocks[clone_hat]["next"] = set_instrument
+    blocks[clone_hat]["next"] = set_instrument_clone
     instrument_reporter = _add_variable_reporter(
         blocks, counter, var_ids["noteInstrument"],
-        "noteInstrument", set_instrument
+        "noteInstrument", set_instrument_clone
     )
-    blocks[set_instrument]["inputs"]["INSTRUMENT"] = _reporter_input(
+    blocks[set_instrument_clone]["inputs"]["INSTRUMENT"] = _reporter_input(
         instrument_reporter, 4, "1"
     )
 
     play_note = _add_block(
-        blocks, counter, "music_playNoteForBeats", parent=set_instrument
+        blocks, counter, "music_playNoteForBeats", parent=set_instrument_clone
     )
-    blocks[set_instrument]["next"] = play_note
+    blocks[set_instrument_clone]["next"] = play_note
     pitch_reporter = _add_variable_reporter(
         blocks, counter, var_ids["notePitch"], "notePitch", play_note
     )
@@ -531,7 +607,6 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
 
     return sprite, {f"{asset_id}.svg": svg}
 
-
 def _build_stage(note_rows):
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1" '
@@ -540,11 +615,23 @@ def _build_stage(note_rows):
     ).encode("utf-8")
     asset_id = hashlib.md5(svg).hexdigest()
 
+    # Consecutive notes with the same start time belong to one MIDI tick batch.
+    group_start_seconds = []
+    group_end_indices = []
+    for note_index, row in enumerate(note_rows, start=1):
+        if not group_start_seconds or row[0] != group_start_seconds[-1]:
+            group_start_seconds.append(row[0])
+            group_end_indices.append(note_index)
+        else:
+            group_end_indices[-1] = note_index
+
     list_values = {
         "StartSeconds": [row[0] for row in note_rows],
         "DurationSeconds": [row[1] for row in note_rows],
         "Pitch": [row[2] for row in note_rows],
         "Instrument": [row[3] for row in note_rows],
+        "GroupStartSeconds": group_start_seconds,
+        "GroupEndIndices": group_end_indices,
     }
     lists = {}
     stage_lists = {}
@@ -584,7 +671,7 @@ def _build_stage(note_rows):
 
 def build_sb3(midi, output_path, project_name="MIDI Project",
               sound_limit=DEFAULT_SOUND_LIMIT):
-    """Build an SB3 project using Stage lists and one clone per note."""
+    """Build an SB3 project using Stage lists and batched per-tick clone creation."""
     if midi is None:
         raise SB3BuildError("MIDI parsing was skipped (polyphony limit reached)")
     if midi.format == 2:
@@ -669,6 +756,7 @@ def build_sb3(midi, output_path, project_name="MIDI Project",
             if maximum > sound_limit else []
         ),
         "list_items": len(rows),
+        "tick_groups": len(stage_lists["GroupStartSeconds"][1]),
     }
 
 
@@ -752,6 +840,7 @@ def main():
             f"{result['max_polyphony']} (limit: {result['sound_limit']})"
         )
         print(f"Stage list items: {result['list_items']}")
+        print(f"Tick groups: {result['tick_groups']}")
         for warning in result["warnings"]:
             print(f"[WARNING] {warning}")
         return 0
