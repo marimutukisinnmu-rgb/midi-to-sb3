@@ -390,8 +390,13 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
         blocks, counter, "event_whenflagclicked",
         top_level=True, x=40, y=40
     )
-    hide = _add_block(blocks, counter, "looks_hide", parent=flag)
-    blocks[flag]["next"] = hide
+    set_tempo = _add_block(
+        blocks, counter, "music_setTempo", parent=flag,
+        inputs={"TEMPO": _number_input(MUSIC_FIXED_TEMPO)}
+    )
+    blocks[flag]["next"] = set_tempo
+    hide = _add_block(blocks, counter, "looks_hide", parent=set_tempo)
+    blocks[set_tempo]["next"] = hide
 
     init_group = _add_block(
         blocks, counter, "data_setvariableto", parent=hide,
