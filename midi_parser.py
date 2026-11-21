@@ -155,9 +155,10 @@ def parse_track(path, offset, length):
                         MIDIEvent(tick, "program_change", channel=channel,
                                   program=data1)
                     )
-                elif event_type == 0xB0 and data1 == 7:
+                elif event_type == 0xB0 and data1 in (7, 11):
+                    controller_type = "volume" if data1 == 7 else "expression"
                     track.events.append(
-                        MIDIEvent(tick, "volume", channel=channel,
+                        MIDIEvent(tick, controller_type, channel=channel,
                                   controller=data1, value=data2)
                     )
                 continue
