@@ -585,7 +585,7 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
     )
     subtract_reporter = subtract_count
     blocks[add_one]["inputs"] = {
-        "NUM1": _reporter_input(subtract_reporter, 3, "0"),
+        "NUM1": _reporter_input(subtract_reporter, 4, "0"),
         "NUM2": _number_input(1),
     }
     blocks[repeat_notes]["inputs"]["TIMES"] = _reporter_input(add_one, 4, "1")
