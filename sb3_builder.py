@@ -778,11 +778,20 @@ def build_sb3(midi, output_path, project_name="MIDI Project",
     tick_to_seconds, tempo_points = _build_tempo_map(midi)
     rows = []
     for note in notes:
+        start_seconds = tick_to_seconds(note.start)
+        end_seconds = tick_to_seconds(note.end)
+        duration_seconds = max(0.001, end_seconds - start_seconds)
+        start_bpm = next(
+            bpm for tick, _, bpm in reversed(tempo_points)
+            if tick <= note.start
+        )
+        # Scratch Music captures the current tempo when the note starts.
+        # Express the full MIDI wall-clock duration in beats at that BPM.
         duration_beats = max(
-            0.001, (note.end - note.start) / midi.ticks_per_beat
+            0.001, duration_seconds * start_bpm / 60.0
         )
         rows.append((
-            tick_to_seconds(note.start),
+            start_seconds,
             duration_beats,
             int(note.pitch),
             int(note.instrument),
