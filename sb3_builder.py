@@ -531,13 +531,9 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
         blocks, counter, "operator_add", parent=repeat_notes
     )
     subtract_reporter = subtract_count
-    one_reporter = _add_block(
-        blocks, counter, "math_number", parent=add_one,
-        fields={"NUM": ["1", None]}, shadow=True
-    )
     blocks[add_one]["inputs"] = {
         "NUM1": _reporter_input(subtract_reporter, 3, "0"),
-        "NUM2": _reporter_input(one_reporter, 4, "1"),
+        "NUM2": _number_input(1),
     }
     blocks[repeat_notes]["inputs"]["TIMES"] = _reporter_input(add_one, 4, "1")
 
@@ -620,7 +616,7 @@ def _build_stage(note_rows):
     ).encode("utf-8")
     asset_id = hashlib.md5(svg).hexdigest()
 
-    # Consecutive notes with the same start time belong to one MIDI tick batch.
+    # Consecutive notes with the same original MIDI tick belong to one batch.
     group_start_seconds = []
     group_end_indices = []
     previous_tick = None
