@@ -48,6 +48,7 @@ class Note:
     velocity: int
     channel: int
     instrument: int
+    volume: int = 127
 
 
 def _event_value(event, name, default=None):
@@ -60,6 +61,9 @@ def _track_notes(track):
     """Pair Note On/Off events and retain the 1-based GM program number."""
     active = defaultdict(deque)
     programs = defaultdict(int)
+    # MIDI CC 7 defaults to 127 here so files without explicit volume events
+    # retain the existing full-volume behavior.
+    volumes = defaultdict(lambda: 127)
     notes = []
     events = sorted(
         enumerate(track.events),
@@ -77,18 +81,23 @@ def _track_notes(track):
             program = int(_event_value(event, "program", 0))
             programs[channel] = max(0, min(127, program))
 
+        elif event_type == "volume":
+            volumes[channel] = max(
+                0, min(127, int(_event_value(event, "value", 127)))
+            )
+
         elif event_type == "note_on":
             pitch = int(_event_value(event, "note", 0))
             velocity = int(_event_value(event, "velocity", 0))
             active[(channel, pitch)].append(
-                (tick, velocity, programs[channel])
+                (tick, velocity, programs[channel], volumes[channel])
             )
 
         elif event_type == "note_off":
             pitch = int(_event_value(event, "note", 0))
             queue = active[(channel, pitch)]
             if queue:
-                start, velocity, program = queue.popleft()
+                start, velocity, program, volume = queue.popleft()
                 if tick > start:
                     notes.append(Note(
                         start=start,
@@ -97,11 +106,12 @@ def _track_notes(track):
                         velocity=velocity,
                         channel=channel,
                         instrument=program + 1,
+                        volume=volume,
                     ))
 
     for (channel, pitch), queue in active.items():
         while queue:
-            start, velocity, program = queue.popleft()
+            start, velocity, program, volume = queue.popleft()
             if last_tick > start:
                 notes.append(Note(
                     start=start,
@@ -110,6 +120,7 @@ def _track_notes(track):
                     velocity=velocity,
                     channel=channel,
                     instrument=program + 1,
+                    volume=volume,
                 ))
 
     return notes
@@ -380,6 +391,7 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
     variable_names = [
         "index", "groupIndex", "previousStart", "groupStart",
         "groupEndIndex", "noteDuration", "notePitch", "noteInstrument",
+        "noteVolume",
     ]
     variables = {
         f"var_{name}": [name, 0, True]
@@ -632,6 +644,9 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
     set_instrument = add_set_from_list(
         repeat_notes, "noteInstrument", "Instrument", "index"
     )
+    set_volume = add_set_from_list(
+        repeat_notes, "noteVolume", "Volume", "index"
+    )
     create_clone = _add_block(
         blocks, counter, "control_create_clone_of", parent=repeat_notes
     )
@@ -649,7 +664,8 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
     )
 
     procedure_body = [
-        set_duration, set_pitch, set_instrument, create_clone, increment_note,
+        set_duration, set_pitch, set_instrument, set_volume,
+        create_clone, increment_note,
     ]
     for left, right in zip(procedure_body, procedure_body[1:]):
         _link(blocks, left, right)
@@ -660,10 +676,22 @@ def _build_worker_sprite(stage_lists, counter, layer_order=1):
         blocks, counter, "control_start_as_clone",
         top_level=True, x=800, y=40
     )
-    set_instrument_clone = _add_block(
-        blocks, counter, "music_midiSetInstrument", parent=clone_hat
+    set_volume_clone = _add_block(
+        blocks, counter, "sound_setvolumeto", parent=clone_hat
     )
-    blocks[clone_hat]["next"] = set_instrument_clone
+    blocks[clone_hat]["next"] = set_volume_clone
+    volume_reporter = _add_variable_reporter(
+        blocks, counter, var_ids["noteVolume"], "noteVolume",
+        set_volume_clone
+    )
+    blocks[set_volume_clone]["inputs"]["VOLUME"] = _reporter_input(
+        volume_reporter, 4, "100"
+    )
+
+    set_instrument_clone = _add_block(
+        blocks, counter, "music_midiSetInstrument", parent=set_volume_clone
+    )
+    blocks[set_volume_clone]["next"] = set_instrument_clone
     instrument_reporter = _add_variable_reporter(
         blocks, counter, var_ids["noteInstrument"],
         "noteInstrument", set_instrument_clone
@@ -738,6 +766,7 @@ def _build_stage(note_rows, tempo_points):
         "DurationBeats": [row[1] for row in note_rows],
         "Pitch": [row[2] for row in note_rows],
         "Instrument": [row[3] for row in note_rows],
+        "Volume": [row[5] for row in note_rows],
         "TimelineSeconds": timeline_seconds,
         "TimelineTempoBPM": timeline_tempo_bpm,
         "TimelineEndIndices": timeline_end_indices,
@@ -835,6 +864,7 @@ def build_sb3(midi, output_path, project_name="MIDI Project",
             int(note.pitch),
             int(note.instrument),
             int(note.start),
+            round(note.volume * 100 / 127, 2),
         ))
     rows.sort(key=lambda row: (row[0], row[4]))
 
